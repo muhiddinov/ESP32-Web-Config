@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "ESP32-web-config",
+			"path": "."
+		},
+		{
+			"path": "../ESP32 WebConfig-esp32dev"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"functional": "cpp",
+			"memory": "cpp"
+		}
+	}
+}
