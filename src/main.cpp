@@ -15,8 +15,9 @@
 #include "SD_MMC.h"
 #include <TimeLib.h>
 
-// #define DEBUG_SERIAL
+#define DEBUG_SERIAL
 // #define AT_SERIAL
+// #define SDMMC_ENABLE
 
 #define DHTPIN      27
 #define DHTTYPE     DHT11
@@ -40,6 +41,7 @@
 #define AT_IP_CHK   10
 #define AT_COPS     11
 #define AT_CCLK     12
+#define ATE_OFF     13
 
 String commands[] = {
   "AT",
@@ -54,7 +56,8 @@ String commands[] = {
   "AT+LOCATION=2",
   "AT+CGDCONT?",
   "AT+COPS?",
-  "AT+CCLK?"
+  "AT+CCLK?",
+  "ATE0"
 };
 
 tmElements_t tm;
@@ -81,7 +84,7 @@ uint32_t message_count = 0, httpget_count = 0, start_cmd_time = 0, end_cmd_time 
 String location = "00.0000,00.0000", ip_addr = "0.0.0.0", device_id = "", server_url = "", server_url2 = "";
 String sopn[] = {"Buztel", "Uzmacom", "UzMobile", "Beeline", "Ucell", "Perfectum", "UMS", "UzMobile", "EVO"};
 String file_name = "", gsm_data = "", date_time = "";
-bool sdmmc_detect = 0, gps_state = 0, frst_btn = 0;
+bool sdmmc_detect = 0, gps_state = 0, frst_btn = 0, no_sim = 0;
 bool next_cmd = true, waitHttpAction = false, star_project = false, device_lost = 0;
 bool internet = false, queue_stop = 0, time_update = 0;
 float voltage = 0.0, tmp = 0.0, hmt = 0.0, water_level = 0.0;
@@ -289,9 +292,9 @@ void setup() {
     gsmSerial.println("AT");
     delay_progress(2000, 200);
   }
-  uint8_t sdmmc_cnt = 0;
-  while(!sdmmc_detect) {
-    sdmmc_detect = SD_MMC.begin();
+  #ifdef SDMMC_ENABLE
+  if(SD_MMC.begin()) {
+    sdmmc_detect = 1;
     if (sdmmc_detect) {
       #ifdef DEBUG_SERIAL
       Serial.println("Card Mounted");
@@ -304,19 +307,16 @@ void setup() {
         File f = SD_MMC.open("/cntr.a", FILE_READ);
         message_count = f.readString().toInt();
       }
-      break;
     }
-    if (sdmmc_cnt >= 2) {
-      break;
-    }
-    sdmmc_cnt ++;
     delay_progress(1000, 200);
   }
+  #endif
   #ifdef DEBUG_SERIAL
   Serial.println("Start.");
   #endif
   delay_progress(1000, 200);
   queue.init();
+  queue.addQueue(commands[ATE_OFF], ATE_OFF);
   queue.addQueue(commands[AT_CHK], AT_CHK);
   queue.addQueue(commands[AT_CSQ], AT_CSQ);
   queue.addQueue(commands[AT_COPS], AT_COPS);
@@ -534,27 +534,56 @@ void loop() {
   if (millis() - start_cmd_time > 10000) {
     next_cmd = true;
     cmd_timeout_count ++;
+    if (sdmmc_detect) {
+      File f = SD_MMC.open("/gsmerr.log", FILE_APPEND);
+      f.println(date_time + "\t\tGSM timeout: " + String(cmd_timeout_count) + " in 5");
+      f.close();
+    }
   }
   if (cmd_timeout_count >= 5) {
     cmd_timeout_count = 0;
     queue_stop = 1;
     next_cmd = 0;
     star_project = 0;
+    if (sdmmc_detect) {
+      File f = SD_MMC.open("/gsmerr.log", FILE_APPEND);
+      f.println(date_time + "\t\tGSM is turn power off");
+      f.close();
+    }
     digitalWrite(GSMR_PIN, 1);
     delay(2000);
     digitalWrite(GSMR_PIN, 0);
-    delay(5000);
+    delay(10000);
     digitalWrite(GSMP_PIN, 1);
     delay(2000);
     digitalWrite(GSMP_PIN, 0);
+    uint32_t start_t = millis();
+    while (!star_project) {
+      checkCommandGSM();
+      if (millis() - start_t >= 2000) {
+        gsmSerial.println("AT");
+        start_t = millis();
+      }
+    }
+    if (sdmmc_detect) {
+      File f = SD_MMC.open("/gsmerr.log", FILE_APPEND);
+      f.println(date_time + "\t\tGSM is turn power off");
+      f.close();
+    }
     queue_stop = 0;
     cops = 0;
-    next_cmd = 1;
-    star_project = 1;
     internet = 0;
     waitHttpAction = 0;
     ip_addr = "0.0.0.0";
     queue.init();
+    queue.addQueue(commands[AT_CHK], AT_CHK);
+    queue.addQueue(commands[AT_CSQ], AT_CSQ);
+    queue.addQueue(commands[AT_COPS], AT_COPS);
+    queue.addQueue(commands[AT_APN], AT_APN);
+    queue.addQueue(commands[AT_CCLK], AT_CCLK);
+    queue.addQueue(commands[AT_NET_CHK], AT_NET_CHK);
+    queue.addQueue(commands[AT_GPS_ON], AT_GPS_ON);
+    queue.addQueue(commands[AT_IP_CHK], AT_IP_CHK);
     _counter_httpget = httpget_time;
     httpget_count = message_count + err_http_count;
   }
@@ -627,6 +656,7 @@ void check_CMD (String str) {
         star_project = true;
       }
       if (str.indexOf("NO SIM") >= 0) {
+        no_sim = true;
         queue_stop = true;
       }
       break;
@@ -659,7 +689,7 @@ void display_update() {
   display.drawString(120, 0, String(int(v_percent)) + "%");
   display.drawFastImage(120, 2, 8, 8, battery_symbol[int(v_percent/20)]);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
-  if (queue_stop) {
+  if (no_sim) {
     display.drawString(64, 0, "No SIM");
   } else {
     display.drawString(64, 0, get_ops(cops));
@@ -668,8 +698,9 @@ void display_update() {
   display.drawString(96, 40, "(T/s)");
   // display.drawString(32, 54, "HC:" + String(httpget_count));
   // display.drawString(96, 54, "MC:" + String(message_count) + " " + String(int(err_http_count) * -1));
-  uint8_t pRAM = map(ESP.getFreeHeap(), 0, ESP.getHeapSize(), 0, 100);
-  display.drawString(64, 54, "RAM: " + String(ESP.getFreeHeap()/1024) + "/" + String(ESP.getHeapSize()/1024) + " KB " + String(pRAM) + "%");
+  uint32_t uRAM = ESP.getHeapSize() - ESP.getFreeHeap();
+  uint8_t pRAM = map(uRAM, 0, ESP.getHeapSize(), 0, 100);
+  display.drawString(64, 54, "Used RAM: " + String(pRAM) + "% " + String(uRAM/1024) + "/" + String(ESP.getHeapSize()/1024) + " KB");
   display.setFont(ArialMT_Plain_24);
   display.drawString(32, 16, String(float(water_level)/100.0));
   display.drawString(96, 16, String(water_cntn));
